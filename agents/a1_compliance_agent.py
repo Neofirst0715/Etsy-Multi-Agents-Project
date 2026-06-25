@@ -22,7 +22,7 @@ embeddings = OllamaEmbeddings(
 )
 
 #Try to find the folder and split the documents into pages
-folder_path = "/Users/neo/Library/Mobile Documents/com~apple~CloudDocs/20xx 我的项目集/Etsy胸针计划/Etsy_Policy"
+folder_path = ""
 if not os.path.exists(folder_path):
     raise FileNotFoundError(f"No such file: {folder_path}")
 try:
