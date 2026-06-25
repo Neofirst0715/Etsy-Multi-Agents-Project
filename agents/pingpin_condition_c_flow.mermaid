@@ -1,0 +1,42 @@
+flowchart TD
+    Start([开始：新SKU待生成文案]) --> HasData{是否已有<br/>自身店铺转化数据?}
+
+    HasData -- 否/冷启动 --> A1
+    HasData -- 是 --> A1
+
+    subgraph 信息收集层
+    A1["Agent1<br/>市场热度代理指标<br/>(eRank/Marmalead搜索趋势<br/>+ favorites/review数<br/>⚠️非真实销量)"]
+    A2["Agent2<br/>热门同类listing<br/>关键词/卖点类别提取<br/>(仅类别，不抓整段原文)"]
+    end
+
+    A1 --> A3
+    A2 --> A3
+
+    OwnData[("自身SKU数据<br/>(已有店铺时)<br/>材质/尺寸/真实属性")]
+    OwnData -. 若存在则加权融合 .-> A3
+
+    A3["Agent3<br/>生成推广文案<br/>(融合市场信号 + 自身数据<br/>保持盐淡风/极简调性)"]
+
+    A3 --> A4{"Agent4<br/>审核"}
+
+    A4 -- "硬性checklist<br/>(规则判断，非LLM)<br/>· 字数100–150<br/>· 关键词覆盖率达标<br/>· 含≥1使用场景<br/>·
+    无违规承诺用语<br/>· 真实属性未编造" --> Hard{硬性全部通过?}
+
+    Hard -- 否 --> Retry{重试次数<br/>< 2次?}
+    Retry -- 是 --> A3
+    Retry -- 否，达上限 --> Human["人工标注/介入<br/>(human-in-the-loop)"]
+
+    Hard -- 是 --> Soft["软性参考<br/>(LLM辅助打分，仅flag不打回)<br/>· 调性是否偏离盐淡风<br/>· 是否自然不堆砌<br/>· 与竞品差异化程度"]
+
+    Soft --> A5
+    Human --> A5
+
+    A5["Agent5<br/>整理输出<br/>(最终文案 + 软性flag供参考<br/>+ 实验日志记录prompt版本)"]
+
+    A5 --> End([交付/归档<br/>写入tracking表])
+
+    style A1 fill:#fff3cd
+    style A2 fill:#fff3cd
+    style A3 fill:#d1ecf1
+    style A4 fill:#f8d7da
+    style A5 fill:#d4edda
