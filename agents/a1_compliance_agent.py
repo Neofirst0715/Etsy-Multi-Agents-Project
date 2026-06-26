@@ -11,6 +11,8 @@ from langchain_chroma import Chroma
 from langgraph.graph.message import add_messages
 from langgraph.graph import StateGraph, END
 
+from agents.pingpingostate import pingpingostate
+
 load_dotenv()
 
 llm = ChatOllama(
@@ -76,7 +78,7 @@ retriever = vectorstore.as_retriever(
 @tool
 def retriever_tool(query:str) -> str:
     """This tool searches and returns the information from the Etsy seller policies"""
-    docs = retriever.inovke(query)
+    docs = retriever.invoke(query)
     if not docs:
         return ("No clauses directly matching your idea were found in the current policy database."
                 "This just means the search didn't hit anything; it doesn't mean the creative idea is compliant or not."
@@ -96,6 +98,14 @@ def retriever_tool(query:str) -> str:
 
 tools = [retriever_tool]
 llm = llm.bind_tools(tools)
+
+def complaince_node(state: pingpingostate) ->pingpingostate:
+    system_prompt = SystemMessage(content = "You are an Etsy specialist")
+    messages = [system_prompt] + state["messages"]
+    response = llm.inference(messages)
+    return {"is_compliance": True, "system_prompt": "Passed"}
+
+
 
 
 
