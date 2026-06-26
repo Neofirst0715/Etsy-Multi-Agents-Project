@@ -25,55 +25,6 @@ Primary metric: favorites rate, compared across conditions with significance tes
 ## Architecture
 
 Five-agent pipeline, diagrammed before any code was written:
-flowchart TD
-    %% Start Node
-    Start([Start: New SKU for Copy Gen]) --> Decision1{Existing own-shop<br/>conversion data?}
-
-    %% Information Gathering Layer
-    Decision1 -- No / Cold start --> InfoGathering
-    Decision1 -- Yes --> InfoGathering
-
-    subgraph InfoGathering [Information Gathering]
-        direction TB
-        A1[Agent 1<br/>Etsy compliance pre-screening<br/>(RAG: retrieve policy clauses<br/>+ structured checklist judgment)]
-        A2[Agent 2<br/>Popular comparable listings<br/>keyword / selling-point<br/>extraction<br/>(categories only, no full text)]
-    end
-
-    OwnData[(Own SKU data<br/>if shop exists<br/>material / size / real<br/>attributes)]
-
-    %% Connections to Agent 3
-    A1 --> A3
-    A2 --> A3
-    OwnData -. weighted in if present .-> A3
-
-    A3[Agent 3<br/>Generate listing copy<br/>(fuse market signals + own<br/>data,<br/>keep tone consistent)]
-
-    %% Agent 4 Audit
-    A3 --> A4{Agent 4<br/>Audit}
-    A4 --> Hard[Hard checklist<br/>(rule-based, not LLM)<br/>· word count 100-150<br/>· keyword coverage met<br/>· >=1 use-case scenario<br/>· no prohibited claims<br/>· no fabricated attributes]
-    
-    Hard --> Decision2{All hard rules pass?}
-
-    %% Audit Logic Branches
-    Decision2 -- Yes --> Soft[Soft review<br/>(LLM scoring, flags only, no<br/>reject)<br/>· tone naturalness<br/>· differentiation vs<br/>competitors]
-    
-    Decision2 -- No --> Decision3{Retry count<br/>< 2?}
-
-    Decision3 -- Yes --> A3
-    Decision3 -- No, cap reached --> Human[Human annotation /<br/>intervention<br/>(human-in-the-loop)]
-
-    %% Convergence to Agent 5
-    Soft --> A5
-    Human --> A5
-
-    A5[Agent 5<br/>Format output<br/>(final copy + soft flags<br/>+ experiment log w/ prompt<br/>version)]
-
-    A5 --> End([Deliver / archive<br/>write to tracking table])
-
-    %% Styling
-    classDef agent fill:#f9f9f9,stroke:#333,stroke-width:1px;
-    class A1,A2,A3,A4,A5 agent;
-
 ```mermaid
 flowchart TD
     Start([Start: new SKU needs copy]) --> HasData{Existing own-shop<br/>conversion data?}

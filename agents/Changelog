@@ -1,0 +1,55 @@
+# Pingpin Agents — Changelog
+
+Daily dev log for the Etsy Enamel Pin multi-agent system (Condition C). Newest entry on top.
+
+---
+
+## 2026-06-26 — Agent 2: Designed and implemented from scratch
+
+**Problem identified:**
+User-pasted competitor listing text can be noisy — marketing fluff, social media links, malformed/poorly structured text. This must not flow into Agent 3 unfiltered, or generated copy quality drops.
+
+**Design decisions:**
+- Agent 2 reframed as a **Quality Gate**, not just a data collector — it sanitizes before it extracts.
+- Adopted a **Signal Extraction Pattern**: instead of manual `if`-gates (hard to maintain, easy to over-strip useful terms like "Personalized"), let the LLM do semantic categorization via a structured-output contract.
+- Defined `CompetitorSignal` (Pydantic `BaseModel`) as the data contract:
+  - `is_valid: bool` — hard pass/fail flag (noise / no product attributes → `False`)
+  - `keywords: List[str]` — deduplicated
+  - `selling_points: List[str]` — material, size, use-case
+  - `reasoning: str` — audit trail for why something passed/failed
+- **Rejected ChromaDB/vector store for A2.** Competitor text is a single short pasted listing — no retrieval needed, just send it straight into the LLM's context window. Vector stores are for A1's use case (searching hundreds of policy pages), not for passing one short string through state.
+- **Data priority rule confirmed:** when both own-shop historical conversion data and competitor data exist, own data is "ground truth" and takes priority over competitor data ("market signal," speculative).
+- **Manual-paste-first confirmed** for competitor data collection — no scraping, which also keeps the project clear of Etsy's ToS restrictions on automated data collection (covered in an earlier discussion).
+
+**Code:**
+- First draft of `seo_agent_node(state)` written: reads `competitor_data` from state, calls `structured_llm.invoke()`, writes back `keyword_list` / `selling_point` / `seo_metadata`.
+- Code review caught and fixed: unused leftover import from A1 (`persist_directory`), dead code line (`competitor_data = f"state[HumanMessage]"` did nothing, removed), unused imports left over from the dropped Chroma approach (`Chroma`, `PyPDFDirectoryLoader`, splitters, etc.).
+- **Not yet fixed:** `if "__name__" == "__main__":` — the quotes around `__name__` mean this condition is never true. Needs the quotes removed.
+- **Not yet resolved:** state class name is spelled three different ways across files — `pingpingostate`, `PinpingoState`, `pinpingostate`. Must be locked to one spelling project-wide before anything will import cleanly.
+
+**Environment fixes:**
+- Resolved a venv/PATH issue: `pip`/`python3` were resolving to the Homebrew global install instead of the project's `.venv`. Fixed by deleting and recreating `.venv`, then re-activating.
+- Confirmed `.gitignore` correctly excludes `.env`, `.venv/`, and private data folders from git tracking; covered `git rm -r --cached <folder>` for the case where something was committed before `.gitignore` existed.
+
+---
+
+## 2026-06-25 — A1 Compliance Agent + main.py: Code review
+
+Reviewed `a1_compliance_agent.py`, `pingpingostate.py` (state file), early `a2_seo_extraction_agent.py` draft, and `main.py`. Found:
+
+- **A1:** placeholder paths (`folder_path`, `persist_directory`) never replaced with real paths; typo `retriever.inovke()` → should be `.invoke()`.
+- **A1's biggest gap:** the file only builds the retriever + `retriever_tool` — there is no `compliance_node` function that actually calls the LLM, loops on tool calls, and writes `is_compliance` / `system_feedback` into state. This is what `main.py` was trying to import and it didn't exist yet.
+- **A2 (early draft):** imported `persist_directory` from A1, which caused A1's entire PDF-loading + Chroma-build code to re-execute every time A2 was imported (module-level side effect — fixed today by moving to a guarded/function-based setup).
+- **main.py:** `langgrah` typo; `add_edge()` misused with a function instead of two node-name strings; **no conditional edge after `compliance_check`** — was a flat unconditional edge straight to `seo_extraction`, which contradicts the design (non-compliant SKUs should `END` immediately, not proceed); no `workflow.compile()` anywhere.
+
+---
+
+## Open items / Next steps
+
+- [ ] Lock the state class to one spelling everywhere (`PinpingoState` is the most consistent choice — fix all imports to match)
+- [ ] Fix `if "__name__" == "__main__":` typo in A2
+- [ ] Implement `compliance_node` in A1 (LLM + tool loop + state write), reusing the `call_llm` / `take_action` / `should_continue` pattern already working in `RAG_Agent.py`
+- [ ] Wire A1 → A2 in `main.py` with a **conditional edge** after `compliance_check` (`is_compliance == False` → `END`, `True` → `seo_extraction`)
+- [ ] Add a second conditional edge after `seo_extraction` (`is_valid` → Agent 3, not valid → human intervention / re-prompt)
+- [ ] Add `workflow.compile()` + an actual invocation entrypoint to `main.py`
+- [ ] Decide whether `retry_count` should be added to `PinpingoState` now, ahead of building Agent 4
