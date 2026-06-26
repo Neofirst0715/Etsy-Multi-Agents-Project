@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage, HumanMessage
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
-from langchain.ollama import OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
@@ -22,13 +22,13 @@ embeddings = OllamaEmbeddings(
 )
 
 #Try to find the folder and split the documents into pages
-folder_path = ""
+folder_path = "Updating----🤭"
 if not os.path.exists(folder_path):
     raise FileNotFoundError(f"No such file: {folder_path}")
 try:
     loader = PyPDFDirectoryLoader(folder_path)
     docs = loader.load()
-    print(f"PDF has been loaded and has {len(folder_path)} pages")
+    print(f"PDF has been loaded and has {len(docs)} pages")
 except Exception as e:
     print(f"Error loading PDF: {e}")
     raise
@@ -51,7 +51,7 @@ text_splitter = RecursiveCharacterTextSplitter(
 page_split = text_splitter.split_documents(docs)
 
 #Save the split documents
-persist_directory = "/Users/neo/Library/Mobile Documents/com~apple~CloudDocs/20xx 我的项目集/Etsy胸针计划/Etsy_Policy"
+persist_directory = "Updating----"
 collection_name = "Neo_research"
 
 if not os.path.exists(persist_directory):
@@ -76,7 +76,7 @@ retriever = vectorstore.as_retriever(
 @tool
 def retriever_tool(query:str) -> str:
     """This tool searches and returns the information from the Etsy seller policies"""
-    docs = retriever.search(query)
+    docs = retriever.inovke(query)
     if not docs:
         return ("No clauses directly matching your idea were found in the current policy database."
                 "This just means the search didn't hit anything; it doesn't mean the creative idea is compliant or not."
@@ -89,29 +89,13 @@ def retriever_tool(query:str) -> str:
         if doc.metadata:
             cat = doc.metadata.get('category', 'Not Labelled')
             label = f"{cat}"
-        piece = title + label + doc.page.content
+        piece = title + label + doc.page_content
         formatted_results.append(piece)
     formatted = "\n\n".join(formatted_results)
-    return f"I found some requirements that your idea may not saitisfied with: \n\n{formatted}"
+    return f"Retrieved the following relevant Etsy policy clauses:\n\n{formatted}"
 
 tools = [retriever_tool]
-llm = llm.bind(tools)
-
-class PinpingoState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], add_messages]
-    user_ideas:str
-    price: str
-    tone_preference: str
-    competitor_data: str
-    keyword_list: list[str]     #A2
-    selling_point: list[str]     #A2
-    seo_metadata: dict     #A2-A3
-    final_title: str       #A3
-    final_description: str #A3
-    is_compliance: bool    #A1
-    rubric_config: dict[str,int]    #A4
-    audit_result: dict[str,int]     #A4
-    system_feedback: str   #A1/A4
+llm = llm.bind_tools(tools)
 
 
 
