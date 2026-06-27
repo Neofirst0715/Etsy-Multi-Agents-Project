@@ -2,7 +2,7 @@
 
 A multi-agent pipeline for generating Etsy listing copy, built as **Condition C** of a controlled experiment testing whether AI assistance improves listing performance for non-native-English Etsy sellers.
 
-> **Status: in progress.** Agent 1 (compliance pre-screening) and Agent 2 (SEO signal extraction) are implemented below. Agents 3–5 are designed (see diagram) and will be added incrementally.
+> **Status: in progress.** Agent 1 (compliance pre-screening), Agent 2 (SEO signal extraction), and Agent 3 (drafting) are implemented below. Agents 4–5 are designed (see diagram) and will be added incrementally.
 
 ## Background
 
@@ -70,7 +70,7 @@ flowchart TD
 |---|---|---|
 | **Agent 1** | Etsy compliance pre-screening (RAG over Etsy seller policy docs + structured checklist judgment) | ✅ Implemented |
 | **Agent 2** | Quality gate + structured SEO signal extraction from manually-pasted competitor listings (sanitize noise → extract deduplicated keywords / selling points via a Pydantic contract). Manual paste, not scraped — Etsy's ToS prohibits automated collection for AI use. | ✅ Implemented |
-| Agent 3 | Synthesizes market signals + own sales data into title/description | 🔲 Planned |
+| **Agent 3** | Drafting agent — fuses A2 market signals + own sales data + tone into a title/description, with a feedback-aware retry loop driven by A4's audit results | ✅ Implemented |
 | Agent 4 | Hybrid critic — hard rules in Python (word count, keyword coverage, use-case presence) gate before LLM soft-scoring on tone/naturalness | 🔲 Planned |
 | Agent 5 | Formats and archives final output + experiment log | 🔲 Planned |
 
@@ -101,7 +101,21 @@ Users paste competitor listing text that is often noisy — marketing fluff, soc
 
 **Design choice — no vector store for Agent 2:** competitor input is a single short pasted listing, not a corpus to search, so it goes straight into the LLM's context window. ChromaDB is reserved for Agent 1's actual retrieval use case (hundreds of policy pages).
 
-**Data priority rule:** when both own-shop historical conversion data and competitor data exist, own data is treated as ground truth and takes priority; competitor data is treated as a (speculative) market signal. Agent 3 will consume `keyword_list` / `selling_point` / `seo_metadata` from state with this weighting in mind.
+**Data priority rule:** when both own-shop historical conversion data and competitor data exist, own data is treated as ground truth and takes priority; competitor data is treated as a (speculative) market signal. Agent 3 consumes `keyword_list` / `selling_point` / `seo_metadata` from state with this weighting in mind.
+
+**Model:** `qwen2.5:7b` (Ollama, local)
+
+## Agent 3 — Drafting Agent (with feedback loop)
+
+Agent 3 is where every upstream signal converges into an actual `title` + `description`. It reads A2's cleaned keywords/selling points, the user's own sales data (if any), the tone preference, and the Etsy constraints, then synthesizes the copy.
+
+**Design choice — one base prompt + conditional append, not two prompts.** The standard the copy must meet (Etsy rules, word count, keyword coverage) is *identical* on the first pass and on a retry — what changes is the material on hand, not the strictness. So `construct_draft_prompt` maintains one base prompt (rules + tone + signals, written once) and, only when `retry_count >= 1`, appends a feedback block: the previous draft plus A4's `system_feedback`, with an instruction to revise the flagged parts. This keeps the Etsy-rules block in a single place (single source of truth) instead of duplicated across two prompts.
+
+**Design choice — state is the memory, so A1/A2 never re-run.** When A4 rejects a draft and routes back to A3, A3 simply re-reads `keyword_list` / `selling_point` / etc. — they're still sitting in shared state from the original A2 run. The retry edge is `A4 → A3`, not `A4 → A1`, so a revision costs one A3 call, not a full pipeline re-execution. No separate memory mechanism is needed.
+
+**Design choice — structured output + regex split.** A Pydantic `BaseModel` plus `re` cleanly separates the title and description into distinct fields, and XML-tagged prompt structure guides the local model toward parseable, robust output rather than one undifferentiated blob.
+
+**Tone handling:** if the user supplied a `tone_preference`, it's folded into the prompt; if left blank, the LLM self-determines a market-appropriate tone. Which branch runs is decided in Python, not left to the model.
 
 **Model:** `qwen2.5:7b` (Ollama, local)
 
@@ -111,7 +125,7 @@ Users paste competitor listing text that is often noisy — marketing fluff, soc
 - Ollama (`qwen2.5:7b`, `nomic-embed-text`) — local inference + embeddings
 - Pydantic — structured-output contracts for agent I/O
 - ChromaDB — vector store (Agent 1 only)
-- Python
+- Python (`re` for title/description parsing)
 
 ## Setup
 
@@ -133,7 +147,12 @@ Agent 1 currently expects Etsy policy PDFs in a local folder referenced by `fold
 **State / shared modules**
 - [ ] `PinpingoState` must live in exactly one place (the shared state module) and be imported everywhere — no duplicate definitions across agent files
 - [ ] Keep the state class name spelled consistently as `PinpingoState` across all files and imports
-- [ ] Decide whether to add `retry_count` to `PinpingoState` now, ahead of building Agent 4's retry loop
+- [ ] Add `retry_count` to `PinpingoState` and settle increment ownership (leaning: A4 increments on reject, A3 only reads)
+
+**Agent 4 (next build)**
+- [ ] Python hard-rule gate (word count 100–150, keyword coverage, ≥1 use-case, no prohibited claims, no fabricated attributes) → pass/fail before any LLM scoring
+- [ ] LLM soft-scoring layer (tone naturalness, differentiation) — flags only, writes `system_feedback` back to state for A3's retry loop
+- [ ] Retry-cap exit: when `retry_count` hits the threshold, route gracefully to human intervention
 
 **Graph wiring (`main.py`)**
 - [ ] Add `workflow.compile()` and an actual invocation entrypoint

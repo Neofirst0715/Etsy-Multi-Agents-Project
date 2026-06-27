@@ -14,6 +14,10 @@ class pingpingostate(TypedDict):
     competitor_data: str        #A2
     keyword_list: list[str]     #A2
     selling_point: list[str]     #A2
+    extracted_description: str   #A2
+    system_feedback: str
+    retry_count: int
+    reasoning: str
     seo_metadata: dict     #A2-A3
     final_title: str       #A3
     final_description: str #A3

@@ -4,6 +4,36 @@ Daily dev log for the Etsy Enamel Pin multi-agent system (Condition C). Newest e
 
 ---
 
+## 2026-06-27 — Agent 3: Drafting agent with feedback loop
+
+**Role:** Agent 3 is the copywriter — it fuses every upstream signal into a `title` + `description`. It's the point where all prior agents' outputs converge.
+
+**Design decisions:**
+- **One base prompt + conditional append (route B), not two separate prompts.** The standard to meet (Etsy rules, word count, keyword coverage) is identical on the first pass and on a retry — what changes is the *material*, not the strictness. First pass = "write from scratch"; retry = "revise against feedback." Keeping one base prompt avoids maintaining the Etsy rules / tone block in two places (single source of truth).
+- **Retry logic via `retry_count`:** if `retry_count == 0`, run first-pass generation (fuse A2 signals + own data + tone). If `retry_count >= 1`, append a feedback block to the base prompt — last draft (`draft_title` / `draft_description`) + `system_feedback` from A4 — and instruct targeted revision.
+- **No separate memory for A3.** State *is* the memory: A1/A2 outputs persist in state, so when A4 routes back to A3, A3 re-reads `keyword_list` / `selling_point` etc. directly — A1 and A2 do **not** re-run. The retry edge is `A4 → A3`, not `A4 → A1`.
+- **Tone handling:** if the user supplied a `tone_preference`, fold it into the prompt; if blank, let the LLM self-determine a market-appropriate tone (Python decides which branch, not the LLM).
+
+**Code:**
+- Implemented `construct_draft_prompt` with structured XML tags guiding the LLM output, improving generation quality and robustness.
+- Used a Pydantic `BaseModel` + `re` (regex) to cleanly split title and description into separate fields instead of parsing one blob of text.
+- State-aware generation wired through `retry_count` + `system_feedback`, giving A3 the ability to self-iterate based on audit results.
+
+**State management understanding (consolidated):**
+- Confirmed the mental model: `State` is a shared dict; read with `state.get()` / `state[]`. Data written by any node persists for all later nodes — that's what makes the A4→A3 retry loop work without re-running A1/A2.
+- Division of labor locked in: A1 = gatekeeper (compliance veto), A2 = material extractor (SEO signals), A3 = copy synthesizer.
+
+**Engineering fixes:**
+- Resolved the `if __name__ == "__main__":` logic trap (the earlier quoted-string version that never ran) and cleaned up function scope for proper modularity.
+- Fixed `main.py` workflow logic: removed a duplicate edge and repaired the conditional edge so the graph forms a proper closed loop.
+- Added defensive handling for `KeyError` and regex-match failures; addressed unreachable-code (greyed-out) static-analysis hints.
+
+**Still pending after today:**
+- A3↔A4 loop isn't closeable until A4 exists — `retry_count` increment ownership needs to be nailed down (leaning: A4 increments on reject, A3 only reads).
+- `main.py` still needs `workflow.compile()` + an end-to-end invocation entrypoint before the A1→A2→A3 trunk can actually run start to finish.
+
+---
+
 ## 2026-06-26 — Agent 2: Designed and implemented from scratch
 
 **Problem identified:**
@@ -24,7 +54,7 @@ User-pasted competitor listing text can be noisy — marketing fluff, social med
 **Code:**
 - First draft of `seo_agent_node(state)` written: reads `competitor_data` from state, calls `structured_llm.invoke()`, writes back `keyword_list` / `selling_point` / `seo_metadata`.
 - Code review caught and fixed: unused leftover import from A1 (`persist_directory`), dead code line (`competitor_data = f"state[HumanMessage]"` did nothing, removed), unused imports left over from the dropped Chroma approach (`Chroma`, `PyPDFDirectoryLoader`, splitters, etc.).
-- **Not yet fixed:** `if "__name__" == "__main__":` — the quotes around `__name__` mean this condition is never true. Needs the quotes removed.
+- **Not yet fixed:** `if "__name__" == "__main__":` — the quotes around `__name__` mean this condition is never true. Needs the quotes removed. *(Fixed 06-27.)*
 - **Not yet resolved:** state class name is spelled three different ways across files — `pingpingostate`, `PinpingoState`, `pinpingostate`. Must be locked to one spelling project-wide before anything will import cleanly.
 
 **Environment fixes:**
@@ -47,9 +77,11 @@ Reviewed `a1_compliance_agent.py`, `pingpingostate.py` (state file), early `a2_s
 ## Open items / Next steps
 
 - [ ] Lock the state class to one spelling everywhere (`PinpingoState` is the most consistent choice — fix all imports to match)
-- [ ] Fix `if "__name__" == "__main__":` typo in A2
+- [x] Fix `if "__name__" == "__main__":` typo in A2 *(done 06-27)*
 - [ ] Implement `compliance_node` in A1 (LLM + tool loop + state write), reusing the `call_llm` / `take_action` / `should_continue` pattern already working in `RAG_Agent.py`
 - [ ] Wire A1 → A2 in `main.py` with a **conditional edge** after `compliance_check` (`is_compliance == False` → `END`, `True` → `seo_extraction`)
 - [ ] Add a second conditional edge after `seo_extraction` (`is_valid` → Agent 3, not valid → human intervention / re-prompt)
 - [ ] Add `workflow.compile()` + an actual invocation entrypoint to `main.py`
-- [ ] Decide whether `retry_count` should be added to `PinpingoState` now, ahead of building Agent 4
+- [ ] Add `retry_count` to `PinpingoState` and decide increment ownership (leaning: A4 increments on reject, A3 only reads)
+- [ ] Build Agent 4 (audit node): Python hard-rule gate → LLM soft-scoring → write `system_feedback` back to state for the A3 retry loop
+- [ ] Handle the retry-cap exit: when `retry_count` hits the threshold, route gracefully to human intervention
