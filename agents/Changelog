@@ -4,6 +4,39 @@ Daily dev log for the Etsy Enamel Pin multi-agent system (Condition C). Newest e
 
 ---
 
+## 2026-06-28 — Agent 4 (audit) built + full graph wired in main.py
+
+**Role:** Agent 4 is the critic. It decides whether A3's draft is good enough to ship, or must be sent back for revision. This is also the day the four nodes (A1→A2→A3→A4) were wired into one compiled graph for the first time — the project goes from "separate parts" to "a system."
+
+**Design decisions — two-layer audit (hard gate, then soft scoring):**
+- **Hard gate is pure Python, pass/fail, no LLM.** `check_hard_rules()` checks the objective, deterministic things: description word count (100–150), banned-word blacklist match, and presence of at least one use-case signal. If any fail, the draft is rejected immediately and never reaches the LLM — this is the cheapest, most reliable layer and runs first.
+- **Soft scoring is LLM, and only runs after the hard gate passes.** `AuditResult` (Pydantic) carries only the subjective dimensions the LLM is actually responsible for: `tone_match`, `selling_points`, `naturalness`, `differentiation` (each 0–5), a total `score` out of 20, and `feedback_points`. Hard-gate results are deliberately **not** in `AuditResult` — they belong to Python's path, not the model's output contract.
+- **The pass/fail threshold decision is Python's, not the LLM's.** The LLM only scores; whether `score < 12` counts as a failure is decided in `audit_node` with a plain Python `if`. "How many points is a fail" is a deterministic rule, so it shouldn't be left to a probabilistic model — same principle as the hard gate.
+- **Rules live in a separate config, not hard-coded in the function.** `BANNED_WORDS`, `USE_CASE_SIGNALS`, `MIN/MAX_WORD_COUNT` moved into `audit_config.py` (single source of truth; changing a rule never touches logic code). Discussed the longer-term maintenance loop: rejected cases get logged → reviewed by a human → confirmed rules added back to the config. The config is slowly-evolving knowledge sourced from real runs, not a one-time guess.
+- **Blacklist kept narrow on purpose.** Context-dependent words like "best"/"authentic" are *not* blanket-banned (they appear in legitimate Etsy copy, e.g. "best gift for mom") — judging those is left to the LLM soft layer to avoid false positives.
+
+**Graph wiring (`main.py`) — four nodes compiled into one loop:**
+- Entry: `compliance_check`.
+- `compliance_check` → conditional edge on `is_compliance` (`True` → `seo_extraction`, `False` → `END`).
+- `seo_extraction` → `listing_draft` (flat edge).
+- `listing_draft` → `audit_node` (flat edge).
+- `audit_node` → conditional edge `should_continue_after_audit`: `Passed` → `END`; `retry_count < 2` → back to `listing_draft` (revise); else → human intervention.
+
+**Bugs caught and fixed during review:**
+- `audit_node`: `result["score"]` → `result.score` (Pydantic attribute access, not dict); `SOFR_THRESHOLD` typo → `SOFT_THRESHOLD`; `adudit_result` typo → `audit_result` (must match the state field name or LangGraph drops it); spacing in `"; ".join(...)`.
+- `main.py`: the audit routing was mistakenly attached to `listing_draft` instead of `audit_node`, with a stray `audit_node → END` — meaning audit never actually ran. Re-attached the conditional edge to `audit_node` and removed the duplicate/conflicting `audit_node → END` edge.
+- `main.py`: `"passed"` vs `"Passed"` case mismatch between the router and `audit_node`'s return (would have judged every pass as a fail).
+- `main.py`: `is_complete` vs `is_compliance` field-name mismatch (would have judged every SKU non-compliant); `workflow.complile()` typo; duplicate/inconsistent imports cleaned up.
+
+**Still pending after today:**
+- Confirm `compile()` runs clean (no unknown-node / dead-end graph errors), then feed one test input end-to-end to watch data flow across all four nodes.
+- `SOFT_THRESHOLD = 12` should move into `audit_config.py` with the other constants.
+- Keyword-coverage check is in the hard-gate design but not yet in `check_hard_rules()`; decide coverage as a threshold (e.g. ≥80%) rather than 100%, to avoid over-strict rejection.
+- Attribute-consistency check (compare draft against SKU data) still to be added to the hard gate.
+- A1's `compliance_node` still not implemented — the graph compiles, but the A1 node can't actually run until that's built.
+
+---
+
 ## 2026-06-27 — Agent 3: Drafting agent with feedback loop
 
 **Role:** Agent 3 is the copywriter — it fuses every upstream signal into a `title` + `description`. It's the point where all prior agents' outputs converge.
@@ -29,7 +62,7 @@ Daily dev log for the Etsy Enamel Pin multi-agent system (Condition C). Newest e
 - Added defensive handling for `KeyError` and regex-match failures; addressed unreachable-code (greyed-out) static-analysis hints.
 
 **Still pending after today:**
-- A3↔A4 loop isn't closeable until A4 exists — `retry_count` increment ownership needs to be nailed down (leaning: A4 increments on reject, A3 only reads).
+- A3↔A4 loop isn't closeable until A4 exists — `retry_count` increment ownership needs to be nailed down (leaning: A4 increments on reject, A3 only reads). *(Settled 06-28: A4 increments on reject, A3 only reads.)*
 - `main.py` still needs `workflow.compile()` + an end-to-end invocation entrypoint before the A1→A2→A3 trunk can actually run start to finish.
 
 ---
@@ -79,9 +112,13 @@ Reviewed `a1_compliance_agent.py`, `pingpingostate.py` (state file), early `a2_s
 - [ ] Lock the state class to one spelling everywhere (`PinpingoState` is the most consistent choice — fix all imports to match)
 - [x] Fix `if "__name__" == "__main__":` typo in A2 *(done 06-27)*
 - [ ] Implement `compliance_node` in A1 (LLM + tool loop + state write), reusing the `call_llm` / `take_action` / `should_continue` pattern already working in `RAG_Agent.py`
-- [ ] Wire A1 → A2 in `main.py` with a **conditional edge** after `compliance_check` (`is_compliance == False` → `END`, `True` → `seo_extraction`)
-- [ ] Add a second conditional edge after `seo_extraction` (`is_valid` → Agent 3, not valid → human intervention / re-prompt)
-- [ ] Add `workflow.compile()` + an actual invocation entrypoint to `main.py`
-- [ ] Add `retry_count` to `PinpingoState` and decide increment ownership (leaning: A4 increments on reject, A3 only reads)
-- [ ] Build Agent 4 (audit node): Python hard-rule gate → LLM soft-scoring → write `system_feedback` back to state for the A3 retry loop
-- [ ] Handle the retry-cap exit: when `retry_count` hits the threshold, route gracefully to human intervention
+- [x] Wire A1 → A2 in `main.py` with a **conditional edge** after `compliance_check` *(done 06-28)*
+- [x] Add `workflow.compile()` to `main.py` *(done 06-28)*
+- [x] Decide `retry_count` increment ownership *(settled 06-28: A4 increments on reject, A3 reads only)*
+- [x] Build Agent 4 (audit node): Python hard-rule gate → LLM soft-scoring → write `system_feedback` for the A3 retry loop *(done 06-28)*
+- [x] Handle the retry-cap exit: route to human intervention when `retry_count` hits the threshold *(done 06-28, in `should_continue_after_audit`)*
+- [ ] Confirm `compile()` runs clean, then run one end-to-end test input through all four nodes
+- [ ] Move `SOFT_THRESHOLD` into `audit_config.py` with the other rule constants
+- [ ] Add keyword-coverage check to `check_hard_rules()` as a threshold (e.g. ≥80%), not 100%
+- [ ] Add attribute-consistency check (draft vs SKU data) to the hard gate
+- [ ] Add an `invoke()` entrypoint to `main.py` so the compiled graph can actually be run

@@ -2,7 +2,7 @@
 
 A multi-agent pipeline for generating Etsy listing copy, built as **Condition C** of a controlled experiment testing whether AI assistance improves listing performance for non-native-English Etsy sellers.
 
-> **Status: in progress.** Agent 1 (compliance pre-screening), Agent 2 (SEO signal extraction), and Agent 3 (drafting) are implemented below. Agents 4–5 are designed (see diagram) and will be added incrementally.
+> **Status: in progress.** Agents 1–4 are implemented, and all four are now wired into a single compiled LangGraph workflow (`main.py`). Agent 5 is designed (see diagram) and will be added next. A1's compliance node still needs its LLM-tool loop filled in before the graph can run end-to-end.
 
 ## Background
 
@@ -68,10 +68,10 @@ flowchart TD
 
 | Agent | Role | Status |
 |---|---|---|
-| **Agent 1** | Etsy compliance pre-screening (RAG over Etsy seller policy docs + structured checklist judgment) | ✅ Implemented |
+| **Agent 1** | Etsy compliance pre-screening (RAG over Etsy seller policy docs + structured checklist judgment) | 🟡 Retriever built; `compliance_node` LLM-tool loop pending |
 | **Agent 2** | Quality gate + structured SEO signal extraction from manually-pasted competitor listings (sanitize noise → extract deduplicated keywords / selling points via a Pydantic contract). Manual paste, not scraped — Etsy's ToS prohibits automated collection for AI use. | ✅ Implemented |
 | **Agent 3** | Drafting agent — fuses A2 market signals + own sales data + tone into a title/description, with a feedback-aware retry loop driven by A4's audit results | ✅ Implemented |
-| Agent 4 | Hybrid critic — hard rules in Python (word count, keyword coverage, use-case presence) gate before LLM soft-scoring on tone/naturalness | 🔲 Planned |
+| **Agent 4** | Two-layer critic — Python hard-gate (pass/fail) before LLM soft-scoring (0–20) on tone, selling points, naturalness, differentiation | ✅ Implemented |
 | Agent 5 | Formats and archives final output + experiment log | 🔲 Planned |
 
 ## Agent 1 — Compliance Pre-Screening
@@ -85,6 +85,8 @@ Etsy requires every listing to be filed under one of four categories (Made by a 
 4. Exposes a `retriever_tool` that the agent calls to ground its compliance judgment in retrieved policy text — rather than guessing from the model's own (often outdated or hallucinated) sense of platform rules
 
 **Design choice — why retrieval is split from judgment:** the retriever's only job is to report what it found (or honestly report that it found nothing). The actual compliance verdict is deliberately *not* decided by free-text LLM judgment alone — local models (this runs on `qwen2.5:7b` via Ollama) tend to hedge or contradict themselves on open-ended questions. The verdict is structured as a category classification step followed by a fixed per-category checklist, so the model's output is auditable rather than a vague paragraph.
+
+**Status note:** the retriever and `retriever_tool` are built, but the `compliance_node` graph node (LLM call + tool loop + write of `is_compliance` / `system_feedback` into state) is not yet implemented — that's the last piece before the graph can run end-to-end.
 
 **Model:** `qwen2.5:7b` (Ollama, local — chosen for reproducibility and zero API cost during development)
 
@@ -119,6 +121,34 @@ Agent 3 is where every upstream signal converges into an actual `title` + `descr
 
 **Model:** `qwen2.5:7b` (Ollama, local)
 
+## Agent 4 — Two-Layer Audit (hard gate + soft scoring)
+
+Agent 4 decides whether A3's draft ships or gets sent back to revise. It runs in two layers, cheapest and most reliable first.
+
+**Layer 1 — hard gate (pure Python, pass/fail, no LLM).** `check_hard_rules()` checks the objective, deterministic things: description word count (100–150), a banned-word blacklist match, and presence of at least one use-case signal. Any failure rejects the draft immediately — it never reaches the LLM. Running deterministic checks in Python (not via the model) avoids the false negatives a local model would introduce on objective rules.
+
+**Layer 2 — soft scoring (LLM, only after the hard gate passes).** An `AuditResult` Pydantic contract carries only the subjective dimensions the LLM is responsible for — `tone_match`, `selling_points`, `naturalness`, `differentiation` (each 0–5), a total `score` /20, and `feedback_points`. Hard-gate results are deliberately **not** part of `AuditResult`; they belong to Python's path.
+
+**Design choice — the pass/fail threshold is Python's call, not the LLM's.** The model only scores; whether `score < 12` counts as a fail is decided with a plain `if` in `audit_node`. "How many points is a fail" is a deterministic rule, so it shouldn't be left to a probabilistic model — the same reasoning that keeps the hard gate in Python.
+
+**Design choice — rules live in `audit_config.py`, not in the function.** `BANNED_WORDS`, `USE_CASE_SIGNALS`, and the word-count bounds are config constants, separated from logic so a rule change never touches code. The intended maintenance loop: rejected cases get logged → reviewed by a human → confirmed rules added to the config. The blacklist is kept deliberately narrow — context-dependent words like "best"/"authentic" are left for the LLM layer to judge, to avoid false positives on legitimate copy.
+
+**On reject**, `audit_node` increments `retry_count` and writes the reason into `system_feedback` for A3 to read on its next pass.
+
+**Model:** `qwen2.5:7b` (Ollama, local)
+
+## Graph wiring (`main.py`)
+
+All four nodes are now compiled into one LangGraph workflow:
+
+- **Entry:** `compliance_check`
+- `compliance_check` → conditional edge on `is_compliance` (`True` → `seo_extraction`; `False` → `END`)
+- `seo_extraction` → `listing_draft`
+- `listing_draft` → `audit_node`
+- `audit_node` → conditional edge (`Passed` → `END`; `retry_count < 2` → back to `listing_draft`; else → human intervention)
+
+This closes the A3↔A4 revision loop. The graph compiles; it cannot run end-to-end yet because A1's `compliance_node` is still a stub.
+
 ## Tech stack
 
 - LangGraph / LangChain — agent orchestration
@@ -139,25 +169,23 @@ Agent 1 currently expects Etsy policy PDFs in a local folder referenced by `fold
 
 ## Known issues / next steps
 
-**Agent 1**
-- [ ] `folder_path` / `persist_directory` are hardcoded placeholder paths — replace with a relative path (`./data/etsy_policy/`) or env var before running elsewhere
+**Agent 1 (last piece before end-to-end run)**
 - [ ] Implement the `compliance_node` graph node (LLM call + tool loop + state write of `is_compliance` / `system_feedback`) — the retriever and `retriever_tool` exist, but nothing calls them yet. Reuse the `call_llm` / `take_action` / `should_continue` pattern already working in `RAG_Agent.py`.
+- [ ] `folder_path` / `persist_directory` are hardcoded placeholder paths — replace with a relative path (`./data/etsy_policy/`) or env var
 - [ ] Wrap A1's module-level setup (PDF load, splitting, Chroma build) in a function or `if __name__ == "__main__":` guard so importing it elsewhere doesn't re-run the whole ingestion
 
+**Agent 4 (hardening)**
+- [ ] Move `SOFT_THRESHOLD` into `audit_config.py` with the other rule constants
+- [ ] Add keyword-coverage check to `check_hard_rules()` as a threshold (e.g. ≥80%), not all-or-nothing
+- [ ] Add attribute-consistency check (draft vs SKU data) to the hard gate
+
 **State / shared modules**
-- [ ] `PinpingoState` must live in exactly one place (the shared state module) and be imported everywhere — no duplicate definitions across agent files
-- [ ] Keep the state class name spelled consistently as `PinpingoState` across all files and imports
-- [ ] Add `retry_count` to `PinpingoState` and settle increment ownership (leaning: A4 increments on reject, A3 only reads)
+- [ ] `PinpingoState` must live in exactly one place (the shared state module) and be imported everywhere — no duplicate definitions
+- [ ] Keep the state class name spelled consistently across all files and imports
 
-**Agent 4 (next build)**
-- [ ] Python hard-rule gate (word count 100–150, keyword coverage, ≥1 use-case, no prohibited claims, no fabricated attributes) → pass/fail before any LLM scoring
-- [ ] LLM soft-scoring layer (tone naturalness, differentiation) — flags only, writes `system_feedback` back to state for A3's retry loop
-- [ ] Retry-cap exit: when `retry_count` hits the threshold, route gracefully to human intervention
-
-**Graph wiring (`main.py`)**
-- [ ] Add `workflow.compile()` and an actual invocation entrypoint
-- [ ] A1 → A2 must be a **conditional edge** on `is_compliance` (`False` → `END`, `True` → `seo_extraction`), not a flat unconditional edge
-- [ ] Add a conditional edge after A2 on `is_valid` (valid → Agent 3; invalid → human intervention / re-prompt)
+**Run / verify**
+- [ ] Confirm `compile()` runs clean (no unknown-node / dead-end errors)
+- [ ] Add an `invoke()` entrypoint to `main.py`, then run one test input end-to-end across all four nodes
 
 **Docs**
 - [ ] Update the mermaid diagram to match the current A1 (RAG compliance) / A2 (quality-gate extraction) design

@@ -99,7 +99,7 @@ def retriever_tool(query:str) -> str:
 tools = [retriever_tool]
 llm = llm.bind_tools(tools)
 
-def complaince_node(state: pingpingostate) ->pingpingostate:
+def compliance_node(state: pingpingostate) ->pingpingostate:
     system_prompt = SystemMessage(content = "You are an Etsy specialist")
     messages = [system_prompt] + state["messages"]
     response = llm.inference(messages)
