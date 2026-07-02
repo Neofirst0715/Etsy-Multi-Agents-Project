@@ -1,15 +1,18 @@
 import json
+import os
 from typing import TypedDict, List, Optional
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-from agents.audit_config import BANNED_WORDS, USE_CASE_SIGNALS, MIN_WORD_COUNT, MAX_WORD_COUNT
-from agents.pingpingostate import pingpingostate
-from langchain_ollama import ChatOllama
+from audit_config import BANNED_WORDS, USE_CASE_SIGNALS, MIN_WORD_COUNT, MAX_WORD_COUNT
+from PingPinGoState import PingPinGoState
+from langchain_openai import ChatOpenAI
 
 load_dotenv()
 
-llm = ChatOllama(
-    model="qwen2.5:7b",
+llm = ChatOpenAI(
+    model="qwen-plus",
+    base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    api_key=os.environ["DASHSCOPE_API_KEY"],
     temperature=0
 )
 
@@ -21,7 +24,7 @@ class AuditResult(BaseModel):
     differentiation: int = Field(description="0-5, distinct from generic competitor copy")
     feedback_points: List[str] = Field(description="Specific, actionable revision notes")
 
-def check_hard_rules(state:pingpingostate) -> tuple[bool,str]:
+def check_hard_rules(state:PingPinGoState) -> tuple[bool,str]:
     """
         Perform deterministic hard rule validation.
         Returns: (is_passed, violation_reason)
@@ -45,7 +48,7 @@ def check_hard_rules(state:pingpingostate) -> tuple[bool,str]:
         return False, "Missing use-case description (e.g., 'gift for', 'perfect for')."
     return True, "Passed "
 
-def audit_node(state:pingpingostate) ->dict:
+def audit_node(state:PingPinGoState) ->dict:
     is_passed, reason = check_hard_rules(state)
     if not is_passed:
         return {
@@ -70,13 +73,18 @@ def audit_node(state:pingpingostate) ->dict:
 
     result = structured_llm.invoke(prompt_for_soft_scoring)
     SOFT_THRESHOLD = 12
-    if result.score < SOFT_THRESHOLD:
+    # Don't trust the model's self-reported aggregate "score" - it's frequently
+    # inconsistent with the four sub-scores it just produced. Compute it ourselves.
+    total_score = result.tone_match + result.selling_points + result.naturalness + result.differentiation
+    audit_result = result.model_dump()
+    audit_result["score"] = total_score
+    if total_score < SOFT_THRESHOLD:
         return{
-            "audit_result": result.model_dump(),
+            "audit_result": audit_result,
             "system_feedback": "Soft quality below threshold: " + "; ".join(result.feedback_points),
             "retry_count": state.get("retry_count", 0) + 1
         }
     return {
-        "audit_result": result.model_dump(),
+        "audit_result": audit_result,
         "system_feedback": "Passed"
     }

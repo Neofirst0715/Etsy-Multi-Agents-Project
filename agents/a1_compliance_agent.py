@@ -3,28 +3,34 @@ import os
 from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage, HumanMessage
 from langchain_core.tools import tool
-from langchain_ollama import ChatOllama
-from langchain_ollama import OllamaEmbeddings
+from langchain_openai import ChatOpenAI
+import dashscope
+dashscope.base_http_api_url = "https://dashscope-intl.aliyuncs.com/api/v1"
+from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_chroma import Chroma
 from langgraph.graph.message import add_messages
 from langgraph.graph import StateGraph, END
-
-from agents.pingpingostate import pingpingostate
+from pydantic import BaseModel
+from PingPinGoState import PingPinGoState
 
 load_dotenv()
 
-llm = ChatOllama(
-    model="qwen2.5:7b",
+llm = ChatOpenAI(
+    model="qwen-plus",
+    base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    api_key=os.environ["DASHSCOPE_API_KEY"],
     temperature=0
 )
-embeddings = OllamaEmbeddings(
-    model = "nomic-embed-text",
+embeddings = DashScopeEmbeddings(
+    model="text-embedding-v3",
+    dashscope_api_key=os.environ["DASHSCOPE_API_KEY"],
 )
 
 #Try to find the folder and split the documents into pages
-folder_path = "Updating----🤭"
+folder_path = "/Users/neo/Library/Mobile Documents/com~apple~CloudDocs/20xx我的项目集/Etsy_Enamel_Pin/agents/Etsy_Policy"
 if not os.path.exists(folder_path):
     raise FileNotFoundError(f"No such file: {folder_path}")
 try:
@@ -53,8 +59,8 @@ text_splitter = RecursiveCharacterTextSplitter(
 page_split = text_splitter.split_documents(docs)
 
 #Save the split documents
-persist_directory = "Updating----"
-collection_name = "Neo_research"
+persist_directory = "/Users/neo/Library/Mobile Documents/com~apple~CloudDocs/20xx我的项目集/Etsy_Enamel_Pin/agents/Etsy_Policy/persist_directory"
+collection_name = "Neo_research_qwen"  # separate from the old local-embedding collection (different vector dimensions)
 
 if not os.path.exists(persist_directory):
     os.makedirs(persist_directory)
@@ -69,6 +75,12 @@ try:
 except Exception as e:
     print(f"Error creating chromaDB vector store: {e}")
     raise
+
+from pydantic import BaseModel, Field
+
+class ComplianceVerdict(BaseModel):
+    is_compliant: bool = Field(description="True only if the selling concept clearly meets Etsy policy")
+    reason: str = Field(description="Which policy clause supports this verdict, or what's missing")
 
 #Search the information that we need
 retriever = vectorstore.as_retriever(
@@ -99,12 +111,29 @@ def retriever_tool(query:str) -> str:
 tools = [retriever_tool]
 llm = llm.bind_tools(tools)
 
-def compliance_node(state: pingpingostate) ->pingpingostate:
+def call_model(state: PingPinGoState):
     system_prompt = SystemMessage(content = "You are an Etsy specialist")
     messages = [system_prompt] + state["messages"]
-    response = llm.inference(messages)
-    return {"is_compliance": True, "system_prompt": "Passed"}
+    response = llm.invoke(messages)
+    return {"messages": [response]}
 
+tool_node = ToolNode(tools)
+a1_builder = StateGraph(PingPinGoState)
+a1_builder.add_node("call_model", call_model)
+a1_builder.add_node("tools", tool_node)
+a1_builder.set_entry_point("call_model")
+a1_builder.add_conditional_edges("call_model", tools_condition)
+a1_builder.add_edge("tools", "call_model")
+a1_compliance_app = a1_builder.compile()
+
+def compliance_node(state: PingPinGoState):
+    result = a1_compliance_app.invoke(state)
+    structured_llm = llm.with_structured_output(ComplianceVerdict)
+    verdict = structured_llm.invoke(result["messages"])
+    return{
+        "is_compliance": verdict.is_compliant,
+        "system_feedback": "Passed" if verdict.is_compliant else f"Not compliant: {verdict.reason}"
+    }
 
 
 

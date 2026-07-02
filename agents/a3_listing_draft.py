@@ -1,19 +1,22 @@
+import os
 import re
-from http.client import responses
 from typing import TypedDict, Annotated, Sequence, List
 from dotenv import load_dotenv
-from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
-from agents.pingpingostate import pingpingostate
+from PingPinGoState import PingPinGoState
+from audit_config import MIN_WORD_COUNT, MAX_WORD_COUNT
 
 load_dotenv()
 
-llm = ChatOllama(
-    model="qwen2.5:7b",
+llm = ChatOpenAI(
+    model="qwen-plus",
+    base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    api_key=os.environ["DASHSCOPE_API_KEY"],
     temperature=0
 )
 
-def construct_draft_prompt(state: pingpingostate) -> str:
+def construct_draft_prompt(state: PingPinGoState) -> str:
     keywords = state["keyword_list"]
     tone = state.get("tone_preference", "professional and friendly")
     selling_point = state.get("selling_point")
@@ -37,22 +40,29 @@ def construct_draft_prompt(state: pingpingostate) -> str:
 
     current_retry = state.get("retry_count", 0)
     if current_retry > 0:
-        prev_title = state.get("draft_title", "")
+        prev_title = state.get("final_title", "")
         feedback = state.get("system_feedback", "")
-        prompt += f"""{prev_title} + {feedback}"""
+        prompt += f"""
+    ### Revision Required (attempt {current_retry}):
+    Your previous title was: "{prev_title}"
+    It was rejected for this reason: {feedback}
+    Please revise the listing to fix that issue. The description MUST be between {MIN_WORD_COUNT} and {MAX_WORD_COUNT} words.
+    """
     return prompt
 
-def listing_draft_node(state: pingpingostate) -> dict:
+def listing_draft_node(state: PingPinGoState) -> dict:
     prompt = construct_draft_prompt(state)
     response = llm.invoke(prompt)
 
     content = response.content if hasattr(response, "content") else str(response)
-    title_match = re.search(r"<title>(.*)</title>", content, re.DOTALL)
-    desc_match = re.search(r"<description>(.*)</description>", content, re.DOTALL)
+    # Small local models occasionally mangle the opening angle bracket (e.g. "description> instead
+    # of <description>), so tolerate any single leading character before the tag name.
+    title_match = re.search(r"[^a-zA-Z]title>(.*?)(?:</title>|$)", content, re.DOTALL)
+    desc_match = re.search(r"[^a-zA-Z]description>(.*?)(?:</description>|$)", content, re.DOTALL)
 
-    final_title = title_match.group(1).strip() if title_match else "Draft Title Failed"
-    final_description = desc_match.group(1).strip() if desc_match else "Draft Description Failed"
+    final_title = title_match.group(1).strip().strip("\"'") if title_match else "Draft Title Failed"
+    final_description = desc_match.group(1).strip().strip("\"'") if desc_match else "Draft Description Failed"
     return {
-        "draft_title": final_title,
-        "draft_description": final_description,
+        "final_title": final_title,
+        "final_description": final_description,
     }

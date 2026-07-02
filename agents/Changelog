@@ -4,6 +4,48 @@ Daily dev log for the Etsy Enamel Pin multi-agent system (Condition C). Newest e
 
 ---
 
+## 2026-07-02 — Migrated the whole pipeline from local Ollama to DashScope cloud Qwen
+
+**Why:** the local `qwen2.5:7b` was the weak link — it hedged on compliance judgments and scored inconsistently in A4. Moved all four LLM-using files (A1–A4) to Alibaba's DashScope cloud Qwen for the Qwen Hackathon submission and for noticeably better output quality.
+
+**Changes:**
+- **LLM swap (A1/A2/A3/A4):** `ChatOllama(qwen2.5:7b)` → `ChatOpenAI(model="qwen-plus", base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1")`. DashScope exposes an OpenAI-compatible endpoint, so the swap is mostly a client + base_url change, not a rewrite.
+- **Embeddings (A1):** `OllamaEmbeddings(nomic-embed-text)` → `DashScopeEmbeddings(text-embedding-v3)`.
+- **Secrets:** API key stored in `agents/.env` (confirmed `.gitignore`d — not committed).
+- **Deps:** installed `langchain-openai` and `dashscope`.
+
+**Bugs / gotchas hit and fixed:**
+1. **401 InvalidApiKey on embeddings.** The `dashscope` SDK defaults to the *domestic* China endpoint, but this key is an *international* account key. Fixed by explicitly pointing the SDK at the intl endpoint: `dashscope.base_http_api_url = "https://dashscope-intl.aliyuncs.com/api/v1"`.
+2. **Embedding-dimension clash in Chroma.** The existing vector store was built with local `nomic-embed-text` (768-dim); cloud `text-embedding-v3` produces a different dimension, and mixing them crashes the store. Fixed by using a fresh `collection_name = "Neo_research_qwen"` so the old and new stores don't collide.
+3. **A4 self-reported total score was unreliable.** The model's self-reported `score` frequently didn't match the sum of its own four sub-scores (observed: four dimensions summed to 18, but the model reported 4) — which was falsely rejecting copy that should have passed. Fixed by computing the final score as the **sum of the four sub-scores** in Python, no longer trusting the model's self-reported total. (Same principle as before: deterministic arithmetic belongs in Python, not the LLM.)
+
+**Result:** cloud Qwen is clearly better than local 7B — a listing passed audit at **18/20 after one retry**, then produced title + description and archived to CSV. End-to-end run is solid.
+
+**Still open:** the vector store rebuilds on every run (the known performance issue) — still functional, just wasteful; can be optimized later by loading an existing persisted store instead of rebuilding.
+
+---
+
+## 2026-06-30 — Agent 5 finished + A1 compliance_node implemented → first true end-to-end run
+
+**This is the milestone day: the pipeline ran start-to-finish for the first time.** Two things landed — A5 (the archive terminus) and A1's real compliance node (the last stub) — which together closed the loop from "SKU concept in" to "archived listing out."
+
+**Agent 5 — Deliver & Archive (clean terminus, no human loop):**
+- Confirmed the design decision from the day before: **A5 is a pure terminus** — format + archive + log, then END. The "human polish → back to A3" loop was deliberately **rejected** for now, because reintroducing an open-ended human edit step would inject a non-standardizable variable and break Condition C's reproducibility. Logged as a post-experiment productization idea, not built.
+- **A5 imports nothing but the state type + its own tools (`csv`, `os`, `datetime`).** It reads everything it needs (`is_compliance`, `keyword_list`, `audit_result`, etc.) straight from shared state — no importing other agents. State is the memory; results are already sitting there from upstream runs.
+- **Two functions + assembly:** a formatting step (format only, no content change — content was already finalized by A4), and an archive function that appends one row per run to `logs/listing_archive.csv` (auto-writes header on first run, `DictWriter`).
+- **Log fields include prompt versions** (`a2_prompt_version` / `a3_prompt_version` / `a4_prompt_version`), pulled from config constants — the reproducibility anchor, so any archived listing can later be traced to the exact prompt versions that produced and scored it. CSV chosen so the data loads straight into pandas/scipy for the experiment analysis in August.
+- **Bugs fixed:** `log_data` scope error (it was a local var in one function that a separate archive function couldn't see — fixed by passing it as an argument instead of trying to share it across functions); `datetime.now()` → `datetime.datetime.now()`; duplicate `audit_config` import; state class-name type hint corrected.
+
+**Agent 1 — compliance_node finally implemented (the last stub):**
+- Built A1 as a **sub-graph**: `call_model ⇄ tool_node` loop (LLM decides it needs policy → calls `retriever_tool` → gets clauses back → judges), wired with `tools_condition`, compiled as its own app and invoked from the main graph's `compliance_check` node. Keeps A1's tool loop encapsulated and decoupled from the linear A2–A5 flow.
+- **Structured final verdict:** after the retrieval loop, a `with_structured_output(ComplianceVerdict)` step forces the model to emit a typed `{is_compliant: bool, reason: str}` — no free-text hedging — which is then written to state as `is_compliance` / `system_feedback`. Same structured-output discipline used in A2/A4.
+- **Verified the tool is actually called** (the known local-model failure mode: models "narrate" a tool call while `tool_calls` comes back empty). Added a print inside `retriever_tool` to confirm real invocation, not narration.
+- **Bugs fixed:** `llm.inference()` → `llm.invoke()`; `call_model` return wrapped as `{"messages": [response]}` (list, for `add_messages`); the write-key was `system_prompt` → corrected to `system_feedback`; and the node no longer hard-codes `is_compliance: True` — it now reflects the actual verdict.
+
+**Result:** with A1 real and A5 in place, the graph ran end-to-end for the first time — concept screened, signals extracted, copy drafted, audited (with a retry), and archived to CSV.
+
+---
+
 ## 2026-06-28 — Agent 4 (audit) built + full graph wired in main.py
 
 **Role:** Agent 4 is the critic. It decides whether A3's draft is good enough to ship, or must be sent back for revision. This is also the day the four nodes (A1→A2→A3→A4) were wired into one compiled graph for the first time — the project goes from "separate parts" to "a system."
@@ -117,8 +159,13 @@ Reviewed `a1_compliance_agent.py`, `pingpingostate.py` (state file), early `a2_s
 - [x] Decide `retry_count` increment ownership *(settled 06-28: A4 increments on reject, A3 reads only)*
 - [x] Build Agent 4 (audit node): Python hard-rule gate → LLM soft-scoring → write `system_feedback` for the A3 retry loop *(done 06-28)*
 - [x] Handle the retry-cap exit: route to human intervention when `retry_count` hits the threshold *(done 06-28, in `should_continue_after_audit`)*
-- [ ] Confirm `compile()` runs clean, then run one end-to-end test input through all four nodes
+- [x] Implement `compliance_node` in A1 (LLM + tool loop + structured verdict) *(done 06-30)*
+- [x] Build Agent 5 (format + archive to CSV + experiment log with prompt versions) *(done 06-30)*
+- [x] First end-to-end run through all nodes *(done 06-30; hardened on cloud Qwen 07-02)*
+- [x] Migrate LLM + embeddings from local Ollama to DashScope cloud Qwen *(done 07-02)*
+- [ ] Optimize Chroma: load the persisted store instead of rebuilding it on every run
 - [ ] Move `SOFT_THRESHOLD` into `audit_config.py` with the other rule constants
 - [ ] Add keyword-coverage check to `check_hard_rules()` as a threshold (e.g. ≥80%), not 100%
 - [ ] Add attribute-consistency check (draft vs SKU data) to the hard gate
-- [ ] Add an `invoke()` entrypoint to `main.py` so the compiled graph can actually be run
+- [ ] A1 `folder_path` / `persist_directory` still hardcoded absolute paths — make relative or env-configured
+- [ ] Lock the state class to one spelling everywhere (`PinpingoState`)
