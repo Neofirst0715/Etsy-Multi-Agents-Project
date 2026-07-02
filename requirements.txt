@@ -1,0 +1,11 @@
+annotated-types==0.7.0
+certifi==2026.5.20
+cffi==2.0.0
+cryptography==48.0.0
+pycparser==3.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+rpds-py==0.30.0
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+wheel==0.47.0
